@@ -12,6 +12,7 @@
 #include <vector>
 #include <functional>
 #include "graph_runtime.h"
+#include <chrono>
 
 namespace tvm {
 namespace runtime {
@@ -57,6 +58,21 @@ class GraphRuntime : public ModuleNode {
     // setup the array and requirements.
     for (size_t i = 0; i < op_execs_.size(); ++i) {
       if (op_execs_[i]) op_execs_[i]();
+    }
+  }
+
+  void Run_Profile() {
+    // setup the array and requirements.
+    this->SetupProfile();
+    auto start_time = std::chrono::high_resolution_clock::now();
+    for (size_t i = 0; i < op_execs_.size(); ++i) {
+      if (op_execs_[i]){
+        auto op_start = std::chrono::high_resolution_clock::now()-start_time;
+        op_execs_[i]();
+        auto op_end = std::chrono::high_resolution_clock::now()-start_time;
+        op_start_time_[i] = std::chrono::duration<float>(op_start).count()*1000;
+        op_end_time_[i] = std::chrono::duration<float>(op_end).count()*1000;
+      }
     }
   }
   /*!
@@ -124,6 +140,27 @@ class GraphRuntime : public ModuleNode {
     CHECK_LT(static_cast<size_t>(index), outputs_.size());
     uint32_t eid = this->entry_id(outputs_[index]);
     TVM_CCALL(TVMArrayCopyFromTo(&data_entry_[eid], data_out, nullptr));
+  }
+  /*!
+   * \brief Get the start time of the index-th operation
+   * \param index The operation index
+   */
+  float GetOpStartTime(int index) {
+    return this->op_start_time_[index];
+  }
+  /*!
+   * \brief Get the end time of the index-th operation
+   * \param index The operation index
+   */
+  float GetOpEndTime(int index) {
+    return this->op_end_time_[index];
+  }
+  /*!
+   * \brief Get the input data size in bytes
+   * \param index The operation index
+   */
+  int GetOpSize (int index) {
+    return this->op_size_[index];
   }
 #ifdef TVM_GRAPH_RUNTIME_DEBUG
   /*!
@@ -351,6 +388,8 @@ class GraphRuntime : public ModuleNode {
   void SetupStorage();
   /*! \brief Setup the executors */
   void SetupOpExecs();
+  /*! \brief Setup the profile */
+  void SetupProfile();
   /*!
    * \brief Create a executtion function given input.
    * \param attrs The node attributes
@@ -397,6 +436,14 @@ class GraphRuntime : public ModuleNode {
   std::vector<DLTensor> data_entry_;
   /*! \brief operator on each node */
   std::vector<std::function<void()> > op_execs_;
+
+  //Profiling tool
+  /*! \brief operator start time (ms) */
+  std::vector<float> op_start_time_;
+  /*! \brief operator end time (ms) */
+  std::vector<float> op_end_time_;
+  /*! \brief operator data size (byte) */
+  std::vector<int> op_size_;
 };
 
 
@@ -460,6 +507,7 @@ void GraphRuntime::SetupStorage() {
       pool_entry_bytes.resize(sid + 1, 0);
     }
     pool_entry_bytes[sid] = std::max(pool_entry_bytes[sid], bytes);
+
   }
   // Allocate the space.
   for (size_t i = 0; i < pool_entry_bytes.size(); ++i) {
@@ -497,6 +545,23 @@ void GraphRuntime::SetupOpExecs() {
     CHECK_EQ(inode.op_type, "tvm_op")
         << "Can only take tvm_op as op";
     op_execs_[nid] = CreateTVMOp(inode.param, args, inode.inputs.size());
+  }
+}
+
+void GraphRuntime::SetupProfile() {
+  //setup data storage
+  op_start_time_ = std::vector<float>(this->num_nodes(),0);
+  op_end_time_ = std::vector<float>(this->num_nodes(),0);
+  op_size_ = std::vector<int>(this->num_nodes(),0);
+
+  //calculate data size (bytes) for each operator
+  for (size_t i = 0; i < this->num_nodes(); i++) {
+    int size = 1;
+    for (int64_t sz : attrs_.shape[i]) {
+      size *= sz;
+    }
+    DLDataType t = tvm::runtime::String2TVMType(attrs_.dltype[i]);
+    op_size_[i] = (t.bits * t.lanes / 8U) * size;
   }
 }
 
@@ -586,9 +651,25 @@ PackedFunc GraphRuntime::GetFunction(
     return PackedFunc([sptr_to_self, this](TVMArgs args, TVMRetValue* rv) {
         this->Run();
       });
+  } else if (name == "run_profile") {
+    return PackedFunc([sptr_to_self, this](TVMArgs args, TVMRetValue* rv) {
+        this->Run_Profile();
+      });
   } else if (name == "load_params") {
     return PackedFunc([sptr_to_self, this](TVMArgs args, TVMRetValue* rv) {
         this->LoadParams(args[0].operator std::string());
+      });
+  } else if (name == "get_op_start_time") {
+    return PackedFunc([sptr_to_self, this](TVMArgs args, TVMRetValue* rv) {
+        *rv = this->GetOpStartTime(args[0]);
+      });
+  } else if (name == "get_op_end_time") {
+    return PackedFunc([sptr_to_self, this](TVMArgs args, TVMRetValue* rv) {
+        *rv = this->GetOpEndTime(args[0]);
+      });
+  } else if (name == "get_op_size") {
+    return PackedFunc([sptr_to_self, this](TVMArgs args, TVMRetValue* rv) {
+        *rv = this->GetOpSize(args[0]);
       });
   } else {
     return PackedFunc();

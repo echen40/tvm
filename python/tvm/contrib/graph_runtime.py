@@ -3,6 +3,8 @@ from .._ffi.base import string_types
 from .._ffi.function import get_global_func
 from ..rpc import base as rpc_base
 from .. import ndarray as nd
+import json
+import re
 
 
 def create(graph_json_str, libmod, ctx):
@@ -80,6 +82,13 @@ class GraphModule(object):
         self._load_params = module["load_params"]
         self.ctx = ctx
 
+        # profiling tool
+        self.profile_data = False
+        self._run_profile = module["run_profile"]
+        self._get_op_start_time = module["get_op_start_time"]
+        self._get_op_end_time = module["get_op_end_time"]
+        self._get_op_size = module["get_op_size"]
+
     def set_input(self, key=None, value=None, **params):
         """Set inputs to the module via kwargs
 
@@ -100,7 +109,7 @@ class GraphModule(object):
             self._set_input(k, nd.array(v, ctx=self.ctx))
         return self
 
-    def run(self, **input_dict):
+    def run(self, profile = False, **input_dict):
         """Run forward execution of the graph
 
         Parameters
@@ -108,9 +117,15 @@ class GraphModule(object):
         input_dict: dict of str to NDArray
             List of input values to be feed to
         """
+
         if input_dict:
             self.set_input(**input_dict)
-        self._run()
+
+        if profile:
+            self.profile_data = True
+            self._run_profile()
+        else:
+            self._run()
 
     def get_input(self, index, out):
         """Get index-th input to out
@@ -176,3 +191,151 @@ class GraphModule(object):
             The key to the module.
         """
         return self.module[key]
+
+    def fetch_op(self,graph):
+        # ensure that profile has been setup
+        if not self.profile_data:
+            raise ValueError("Run module with profile first.")
+        # get shape
+        op_shape = graph.json_attr("shape")
+
+        # get dtype
+        op_dtype = graph.json_attr("dltype")
+
+        # get nodes
+        op_nodes = graph.index.nodes
+
+        # get node row ptr
+        n_rp = graph.index.entry_ptr
+
+        # get start times
+        op_start = []
+        for i in range(graph.index.num_nodes):
+            op_start.append(self._get_op_start_time(i))
+
+        # get end times
+        op_end = []
+        for i in range(graph.index.num_nodes):
+            op_end.append(self._get_op_end_time(i))
+
+        # get node sizes
+        op_size = []
+        for i in range(graph.index.num_nodes):
+            op_size.append(self._get_op_size(i))
+
+        return op_shape, op_dtype, op_nodes, n_rp, op_start, op_end, op_size
+
+    def get_profile_data(self, graph):
+
+        # get operation info
+        op_shape, op_dtype, op_nodes, n_rp, op_start, op_end, op_size = self.fetch_op(graph)
+
+        # create profile
+        op_profile = []
+        for i in range(graph.index.num_nodes):
+            # skip non-operation nodes
+            if op_nodes[i]["op"] == "null": continue
+            # add operation information
+            op_dict = {"OpName": op_nodes[i]["name"],
+                       "OpType": op_nodes[i]["op"],
+                       "StartTime": op_start[i],
+                       "EndTime": op_end[i],
+                       "Duration": op_end[i]-op_start[i],
+                       "FuncName": op_nodes[i]["attrs"]["func_name"],
+                       "NumInput": int(op_nodes[i]["attrs"]["num_inputs"]),
+                       "NumOutput": int(op_nodes[i]["attrs"]["num_outputs"])}
+            # add input information
+            inputs = []
+            for idx in range(int(op_nodes[i]["attrs"]["num_inputs"])):
+                n_entry = op_nodes[i]["inputs"][idx]
+                n_idx = n_rp[n_entry[0]]+n_entry[1]
+                input_attr = {"InDim": len(op_shape[n_idx]),
+                              "InShape": op_shape[n_idx],
+                              "InDType": op_dtype[n_idx],
+                              "InSize": op_size[n_idx]}
+                inputs.append({"Input_%d"%(idx+1):input_attr})
+            op_dict["Input"] = inputs
+            # add output information
+            outputs = []
+            for idx in range(int(op_nodes[i]["attrs"]["num_outputs"])):
+                n_idx = n_rp[i]+idx
+                output_attr = {"OutDim": len(op_shape[n_idx]),
+                               "OutShape": op_shape[n_idx],
+                               "OutDType": op_dtype[n_idx],
+                               "OutSize": op_size[n_idx]}
+                outputs.append({"Output_%d"%(idx+1):output_attr})
+            op_dict["Output"] = outputs
+            # update profile
+            op_profile.append(op_dict)
+
+        return op_profile
+
+    def get_profile_json(self, graph, process=""):
+
+        # get operation info
+        op_shape, op_dtype, op_nodes, n_rp, op_start, op_end, op_size = self.fetch_op(graph)
+
+        # create profile
+        json_profile = []
+        for i in range(graph.index.num_nodes):
+            # skip non-operation nodes
+            if op_nodes[i]["op"] == "null": continue
+            # add operation information
+            arg_dict = {"": "_"*125,
+                        "Operation Name:": op_nodes[i]["name"],
+                       "Operation Type:": op_nodes[i]["op"],
+                       "Start Time (ms):": op_start[i],
+                       "End Time (ms):": op_end[i],
+                       "Duration (ms):": op_end[i]-op_start[i],
+                       "Function Name:": op_nodes[i]["attrs"]["func_name"],
+                       "Number of Inputs:": int(op_nodes[i]["attrs"]["num_inputs"]),
+                       "Number of Outputs:": int(op_nodes[i]["attrs"]["num_outputs"])}
+            # add input information
+            inputs = []
+            for idx in range(int(op_nodes[i]["attrs"]["num_inputs"])):
+                n_entry = op_nodes[i]["inputs"][idx]
+                n_idx = n_rp[n_entry[0]]+n_entry[1]
+                input_attr = {"Input Name": op_nodes[n_idx]["name"],
+                              "Input Type": op_nodes[n_idx]["op"],
+                              "Input Function": op_nodes[i]["attrs"]["func_name"],
+                              "Input Dimensions": len(op_shape[n_idx]),
+                              "Input Shape": " x ".join(list(map(str,op_shape[n_idx]))),
+                              "Input Data Type": op_dtype[n_idx],
+                              "Input Size (bytes)": op_size[n_idx]}
+                inputs.append({"Input_%d"%(idx+1):input_attr})
+            arg_dict["Input"] = inputs
+            # add output information
+            outputs = []
+            for idx in range(int(op_nodes[i]["attrs"]["num_outputs"])):
+                n_idx = n_rp[i]+idx
+                output_attr = {"Output Name": op_nodes[n_idx]["name"],
+                               "Output Type": op_nodes[n_idx]["op"],
+                               "Output Function": op_nodes[i]["attrs"]["func_name"],
+                               "Output Dimensions": len(op_shape[n_idx]),
+                               "Output Shape": " x ".join(list(map(str,op_shape[n_idx]))),
+                               "Output Data Type": op_dtype[n_idx],
+                               "Output Size (bytes)": op_size[n_idx]}
+                outputs.append({"Output_%d"%(idx+1):output_attr})
+            arg_dict["Output"] = outputs
+            # update profile
+            op = re.sub(r'\d+_','_',op_nodes[i]["attrs"]["func_name"])
+            op = re.sub(r'_\d+$','',op)
+            op = re.sub(r'\d+$','',op)
+            json_profile.append({ : op,
+                                 "cat":  "DLC",
+                                 "ph":   "B",
+                                 "ts":   op_start[i]*1000,
+                                 "pid":  process,
+                                 "tid":  repr(self.ctx),
+                                 "args": arg_dict})
+            json_profile.append({"ph":   "E",
+                                 "ts":   op_end[i]*1000,
+                                 "pid":  process,
+                                 "tid":  repr(self.ctx)})
+
+        return json_profile
+
+
+    def export_profile(self, fname, graph, process=""):
+        with open(fname, "w") as of:
+            json.dump(self.get_profile_json(graph, process), of, indent=2)
