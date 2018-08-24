@@ -6,23 +6,21 @@ from .. import ndarray as nd
 import json
 import re
 
+BAR_LEN = 125 # Length of Bar that separates the arg attribute for profiles in json format. 
+              # Makes output of chrome tracing look nicer.
 
 def create(graph_json_str, libmod, ctx):
     """Create a runtime executor module given a graph and module.
-
     Parameters
     ----------
     graph_json_str : str or graph class
         The graph to be deployed in json format output by nnvm graph.
         The graph can only contain one operator(tvm_op) that
         points to the name of PackedFunc in the libmod.
-
     libmod : tvm.Module
         The module of the corresponding function
-
     ctx : TVMContext
         The context to deploy the module, can be local or remote.
-
     Returns
     -------
     graph_module : GraphModule
@@ -48,24 +46,19 @@ def create(graph_json_str, libmod, ctx):
 
 class GraphModule(object):
     """Wrapper runtime module.
-
     This is a thin wrapper of the underlying TVM module.
     you can also directly call set_input, run, and get_output
     of underlying module functions
-
     Parameters
     ----------
     module : Module
         The interal tvm module that holds the actual graph functions.
-
     ctx : TVMContext
         The context this module is under
-
     Attributes
     ----------
     module : Module
         The interal tvm module that holds the actual graph functions.
-
     ctx : TVMContext
         The context this module is under
     """
@@ -91,15 +84,12 @@ class GraphModule(object):
 
     def set_input(self, key=None, value=None, **params):
         """Set inputs to the module via kwargs
-
         Parameters
         ----------
         key : int or str
            The input key
-
         value : the input value.
            The input key
-
         params : dict of str to NDArray
            Additonal arguments
         """
@@ -111,7 +101,6 @@ class GraphModule(object):
 
     def run(self, profile = False, **input_dict):
         """Run forward execution of the graph
-
         Parameters
         ----------
         input_dict: dict of str to NDArray
@@ -129,12 +118,10 @@ class GraphModule(object):
 
     def get_input(self, index, out):
         """Get index-th input to out
-
         Parameters
         ----------
         index : int
             The input index
-
         out : NDArray
             The output array container
         """
@@ -143,12 +130,10 @@ class GraphModule(object):
 
     def get_output(self, index, out):
         """Get index-th output to out
-
         Parameters
         ----------
         index : int
             The input index
-
         out : NDArray
             The output array container
         """
@@ -157,12 +142,10 @@ class GraphModule(object):
 
     def debug_get_output(self, node, out):
         """Run graph upto node and get the output to out
-
         Parameters
         ----------
         node : int / str
             The node index or name
-
         out : NDArray
             The output array container
         """
@@ -174,7 +157,6 @@ class GraphModule(object):
 
     def load_params(self, params_bytes):
         """Load parameters from serialized byte array of parameter dict.
-
         Parameters
         ----------
         params_bytes : bytearray
@@ -184,7 +166,6 @@ class GraphModule(object):
 
     def __getitem__(self, key):
         """Get internal module function
-
         Parameters
         ----------
         key : str
@@ -193,32 +174,23 @@ class GraphModule(object):
         return self.module[key]
 
     def fetch_op(self,graph):
-        # ensure that profile has been setup
+
         if not self.profile_data:
             raise ValueError("Run module with profile first.")
-        # get shape
+
         op_shape = graph.json_attr("shape")
-
-        # get dtype
         op_dtype = graph.json_attr("dltype")
-
-        # get nodes
         op_nodes = graph.index.nodes
-
-        # get node row ptr
         n_rp = graph.index.entry_ptr
 
-        # get start times
         op_start = []
         for i in range(graph.index.num_nodes):
             op_start.append(self._get_op_start_time(i))
 
-        # get end times
         op_end = []
         for i in range(graph.index.num_nodes):
             op_end.append(self._get_op_end_time(i))
 
-        # get node sizes
         op_size = []
         for i in range(graph.index.num_nodes):
             op_size.append(self._get_op_size(i))
@@ -249,7 +221,10 @@ class GraphModule(object):
             for idx in range(int(op_nodes[i]["attrs"]["num_inputs"])):
                 n_entry = op_nodes[i]["inputs"][idx]
                 n_idx = n_rp[n_entry[0]]+n_entry[1]
-                input_attr = {"InDim": len(op_shape[n_idx]),
+                input_attr = {"InName": op_nodes[n_idx]["name"],
+                              "InType": op_nodes[n_idx]["op"],
+                              "InFunc": op_nodes[i]["attrs"]["func_name"],
+                              "InDim": len(op_shape[n_idx]),
                               "InShape": op_shape[n_idx],
                               "InDType": op_dtype[n_idx],
                               "InSize": op_size[n_idx]}
@@ -259,7 +234,10 @@ class GraphModule(object):
             outputs = []
             for idx in range(int(op_nodes[i]["attrs"]["num_outputs"])):
                 n_idx = n_rp[i]+idx
-                output_attr = {"OutDim": len(op_shape[n_idx]),
+                output_attr = {"OutName": op_nodes[n_idx]["name"],
+                               "OutType": op_nodes[n_idx]["op"],
+                               "OutFunc": op_nodes[i]["attrs"]["func_name"],
+                               "OutDim": len(op_shape[n_idx]),
                                "OutShape": op_shape[n_idx],
                                "OutDType": op_dtype[n_idx],
                                "OutSize": op_size[n_idx]}
@@ -281,15 +259,15 @@ class GraphModule(object):
             # skip non-operation nodes
             if op_nodes[i]["op"] == "null": continue
             # add operation information
-            arg_dict = {"": "_"*125,
+            arg_dict = {"": "_"*BAR_LEN,
                         "Operation Name:": op_nodes[i]["name"],
-                       "Operation Type:": op_nodes[i]["op"],
-                       "Start Time (ms):": op_start[i],
-                       "End Time (ms):": op_end[i],
-                       "Duration (ms):": op_end[i]-op_start[i],
-                       "Function Name:": op_nodes[i]["attrs"]["func_name"],
-                       "Number of Inputs:": int(op_nodes[i]["attrs"]["num_inputs"]),
-                       "Number of Outputs:": int(op_nodes[i]["attrs"]["num_outputs"])}
+                        "Operation Type:": op_nodes[i]["op"],
+                        "Start Time (ms):": op_start[i],
+                        "End Time (ms):": op_end[i],
+                        "Duration (ms):": op_end[i]-op_start[i],
+                        "Function Name:": op_nodes[i]["attrs"]["func_name"],
+                        "Number of Inputs:": int(op_nodes[i]["attrs"]["num_inputs"]),
+                        "Number of Outputs:": int(op_nodes[i]["attrs"]["num_outputs"])}
             # add input information
             inputs = []
             for idx in range(int(op_nodes[i]["attrs"]["num_inputs"])):
@@ -321,7 +299,7 @@ class GraphModule(object):
             op = re.sub(r'\d+_','_',op_nodes[i]["attrs"]["func_name"])
             op = re.sub(r'_\d+$','',op)
             op = re.sub(r'\d+$','',op)
-            json_profile.append({ : op,
+            json_profile.append({"name": op,
                                  "cat":  "DLC",
                                  "ph":   "B",
                                  "ts":   op_start[i]*1000,

@@ -67,11 +67,15 @@ class GraphRuntime : public ModuleNode {
     auto start_time = std::chrono::high_resolution_clock::now();
     for (size_t i = 0; i < op_execs_.size(); ++i) {
       if (op_execs_[i]){
-        auto op_start = std::chrono::high_resolution_clock::now()-start_time;
+        auto op_start = std::chrono::high_resolution_clock::now() - start_time;
         op_execs_[i]();
-        auto op_end = std::chrono::high_resolution_clock::now()-start_time;
-        op_start_time_[i] = std::chrono::duration<float>(op_start).count()*1000;
-        op_end_time_[i] = std::chrono::duration<float>(op_end).count()*1000;
+        auto op_end = std::chrono::high_resolution_clock::now() - start_time;
+        op_start_time_.push_back(std::chrono::duration<float>(op_start).count()*1000);
+        op_end_time_.push_back(std::chrono::duration<float>(op_end).count()*1000);
+      }else{
+        // dummy for correct indexing
+        op_start_time_.push_back(0);
+        op_end_time_.push_back(0);
       }
     }
   }
@@ -550,9 +554,9 @@ void GraphRuntime::SetupOpExecs() {
 
 void GraphRuntime::SetupProfile() {
   //setup data storage
-  op_start_time_ = std::vector<float>(this->num_nodes(),0);
-  op_end_time_ = std::vector<float>(this->num_nodes(),0);
-  op_size_ = std::vector<int>(this->num_nodes(),0);
+  op_start_time_ = std::vector<float>();
+  op_end_time_ = std::vector<float>();
+  op_size_ = std::vector<int>();
 
   //calculate data size (bytes) for each operator
   for (size_t i = 0; i < this->num_nodes(); i++) {
@@ -561,7 +565,7 @@ void GraphRuntime::SetupProfile() {
       size *= sz;
     }
     DLDataType t = tvm::runtime::String2TVMType(attrs_.dltype[i]);
-    op_size_[i] = (t.bits * t.lanes / 8U) * size;
+    op_size_.push_back((t.bits * t.lanes / 8U) * size);
   }
 }
 
